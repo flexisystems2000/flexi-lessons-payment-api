@@ -20,6 +20,8 @@ const FIREBASE_SERVICE_ACCOUNT_JSON =
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
+const SUPABASE_SERVICE_ROLE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 const PORT = process.env.PORT || 3000;
 
@@ -235,6 +237,97 @@ function addCalendarMonths(date, months) {
   return result;
 }
 
+// ======================================================
+// 5. MASTERCLASS ENTITLEMENT STORAGE
+// ======================================================
+
+async function saveMasterclassEntitlement(userId, entitlement) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error(
+      'Masterclass entitlement storage is not configured.'
+    );
+  }
+
+  const endpoint =
+    `${SUPABASE_URL.replace(/\/+$/, '')}/rest/v1/masterclass_entitlements?on_conflict=user_id`;
+
+  const now = new Date().toISOString();
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=merge-duplicates,return=minimal'
+    },
+    body: JSON.stringify({
+      user_id: userId,
+      registration_id: entitlement.registrationId,
+      registration_email: entitlement.email,
+      subscription_plan: entitlement.subscriptionPlan || null,
+      expires_at: entitlement.expiresAt,
+      verified_at: now,
+      source: 'flexi_lessons_firestore',
+      updated_at: now
+    }),
+    signal: AbortSignal.timeout(12000)
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+
+    console.error(
+      'Masterclass entitlement upsert failed:',
+      response.status,
+      detail.slice(0, 500)
+    );
+
+    throw new Error(
+      'Unable to save the verified Masterclass entitlement.'
+    );
+  }
+}
+
+async function revokeMasterclassEntitlement(userId) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+    throw new Error(
+      'Masterclass entitlement storage is not configured.'
+    );
+  }
+
+  const endpoint =
+    `${SUPABASE_URL.replace(/\/+$/, '')}/rest/v1/masterclass_entitlements?user_id=eq.${encodeURIComponent(userId)}`;
+
+  const response = await fetch(endpoint, {
+    method: 'DELETE',
+    headers: {
+      apikey: SUPABASE_SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+      Prefer: 'return=minimal'
+    },
+    signal: AbortSignal.timeout(12000)
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => '');
+
+    console.error(
+      'Masterclass entitlement revoke failed:',
+      response.status,
+      detail.slice(0, 500)
+    );
+
+    throw new Error(
+      'Unable to revoke the Masterclass entitlement.'
+    );
+  }
+}
+
+// ======================================================
+// 6. MASTERCLASS REGISTRATION HELPERS
+// ======================================================
+
 function normalizeMasterclassEmail(value) {
   return safeString(value).toLowerCase();
 }
@@ -271,8 +364,7 @@ function getMasterclassSubscriptionExpiry(registration) {
     registration.subscriptionExpiryDate,
     registration.expiryDate,
     registration.expiresAt,
-    registration.subscriptionEndDate,
-    registration.subscriptionExpiryDate
+    registration.subscriptionEndDate
   ];
 
   for (const value of directExpiryFields) {
@@ -280,8 +372,6 @@ function getMasterclassSubscriptionExpiry(registration) {
     if (date) return date;
   }
 
-  // Fallback for older registration records.
-  // Never calculate an expiry for an unverified payment.
   if (
     registration.paymentStatus !== true ||
     registration.paymentVerified !== true
@@ -306,6 +396,10 @@ function getMasterclassSubscriptionExpiry(registration) {
   return addCalendarMonths(startDate, months);
 }
 
+// ======================================================
+// 7. PAYSTACK VERIFICATION HELPER
+// ======================================================
+
 async function verifyPaystackTransaction(reference) {
   const response = await fetch(
     'https://api.paystack.co/transaction/verify/' +
@@ -325,13 +419,17 @@ async function verifyPaystackTransaction(reference) {
   try {
     result = await response.json();
   } catch {
-    const error = new Error('Paystack returned an invalid response.');
+    const error = new Error(
+      'Paystack returned an invalid response.'
+    );
     error.statusCode = 502;
     throw error;
   }
 
   if (!response.ok || result.status !== true || !result.data) {
-    const error = new Error('Paystack could not verify this transaction.');
+    const error = new Error(
+      'Paystack could not verify this transaction.'
+    );
     error.statusCode = 502;
     throw error;
   }
@@ -340,7 +438,7 @@ async function verifyPaystackTransaction(reference) {
 }
 
 // ======================================================
-// 5. HEALTH CHECKS
+// 8. HEALTH CHECKS
 // ======================================================
 
 app.get('/', (req, res) => {
@@ -359,12 +457,17 @@ app.get('/api/health', (req, res) => {
     status: 'running',
     firebaseReady: Boolean(db),
     paystackConfigured: Boolean(PAYSTACK_SECRET_KEY),
-    supabaseConfigured: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
+    supabaseConfigured: Boolean(
+      SUPABASE_URL && SUPABASE_ANON_KEY
+    ),
+    masterclassEntitlementStorageConfigured: Boolean(
+      SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY
+    )
   });
 });
 
 // ======================================================
-// 6. VERIFY ORIGINAL REGISTRATION PAYMENT
+// 9. VERIFY ORIGINAL REGISTRATION PAYMENT
 // ======================================================
 
 app.post('/api/verify-payment', async (req, res) => {
@@ -400,8 +503,12 @@ app.post('/api/verify-payment', async (req, res) => {
     }
 
     const registration = snapshot.data() || {};
-    const savedReference = safeString(registration.paystackReference);
-    const storedRegistrationId = safeString(registration.registrationId);
+    const savedReference = safeString(
+      registration.paystackReference
+    );
+    const storedRegistrationId = safeString(
+      registration.registrationId
+    );
 
     const referenceMatches =
       reference === registrationId ||
@@ -462,7 +569,8 @@ app.post('/api/verify-payment', async (req, res) => {
       });
     }
 
-    const expectedAmountKobo = getExpectedAmountKobo(registration);
+    const expectedAmountKobo =
+      getExpectedAmountKobo(registration);
 
     if (
       !Number.isSafeInteger(expectedAmountKobo) ||
@@ -495,24 +603,33 @@ app.post('/api/verify-payment', async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
+        verified: false,
         error: 'The registration ID does not match the stored record.'
       });
     }
 
-    const confirmedAt = admin.firestore.FieldValue.serverTimestamp();
+    const confirmedAt =
+      admin.firestore.FieldValue.serverTimestamp();
 
     await db.runTransaction(async transactionWriter => {
-      const freshSnapshot = await transactionWriter.get(registrationRef);
+      const freshSnapshot =
+        await transactionWriter.get(registrationRef);
 
       if (!freshSnapshot.exists) {
-        throw new Error('Registration disappeared during verification.');
+        throw new Error(
+          'Registration disappeared during verification.'
+        );
       }
 
       const freshData = freshSnapshot.data() || {};
-      const freshReference = safeString(freshData.paystackReference);
+      const freshReference = safeString(
+        freshData.paystackReference
+      );
 
       if (freshReference && freshReference !== reference) {
-        throw new Error('The stored payment reference changed during verification.');
+        throw new Error(
+          'The stored payment reference changed during verification.'
+        );
       }
 
       transactionWriter.set(registrationRef, {
@@ -544,7 +661,10 @@ app.post('/api/verify-payment', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Payment verification error:', error.message);
+    console.error(
+      'Payment verification error:',
+      error.message
+    );
 
     if (
       error.name === 'TimeoutError' ||
@@ -566,7 +686,7 @@ app.post('/api/verify-payment', async (req, res) => {
 });
 
 // ======================================================
-// 7. VERIFY SUBSCRIPTION RENEWAL
+// 10. VERIFY SUBSCRIPTION RENEWAL
 // ======================================================
 
 app.post('/api/verify-renewal', async (req, res) => {
@@ -641,11 +761,17 @@ app.post('/api/verify-renewal', async (req, res) => {
     }
 
     const normalizedPlan = normalizePlan(pending.planKey);
-    const months = normalizedPlan ? PLAN_MONTHS[normalizedPlan] : 0;
-    const netAmount = normalizedPlan ? PAYMENT_PLANS[normalizedPlan] : 0;
+    const months = normalizedPlan
+      ? PLAN_MONTHS[normalizedPlan]
+      : 0;
+    const netAmount = normalizedPlan
+      ? PAYMENT_PLANS[normalizedPlan]
+      : 0;
+
     const expectedGrossNaira = netAmount
       ? calculateGrossAmountNaira(netAmount)
       : 0;
+
     const expectedAmountKobo = expectedGrossNaira * 100;
 
     if (
@@ -711,17 +837,22 @@ app.post('/api/verify-renewal', async (req, res) => {
       .collection('paystackTransactions')
       .doc(reference);
 
-    const verifiedAt = admin.firestore.FieldValue.serverTimestamp();
+    const verifiedAt =
+      admin.firestore.FieldValue.serverTimestamp();
+
     let renewalResult = null;
 
     await db.runTransaction(async transactionWriter => {
-      const [freshSnapshot, transactionSnapshot] = await Promise.all([
-        transactionWriter.get(registrationRef),
-        transactionWriter.get(transactionRef)
-      ]);
+      const [freshSnapshot, transactionSnapshot] =
+        await Promise.all([
+          transactionWriter.get(registrationRef),
+          transactionWriter.get(transactionRef)
+        ]);
 
       if (!freshSnapshot.exists) {
-        throw new Error('Student registration was not found during final verification.');
+        throw new Error(
+          'Student registration was not found during final verification.'
+        );
       }
 
       const freshData = freshSnapshot.data() || {};
@@ -744,7 +875,9 @@ app.post('/api/verify-renewal', async (req, res) => {
         freshPending.renewalId !== renewalId ||
         !freshAllowedReferences.includes(reference)
       ) {
-        throw new Error('The pending renewal changed during verification.');
+        throw new Error(
+          'The pending renewal changed during verification.'
+        );
       }
 
       if (transactionSnapshot.exists) {
@@ -754,7 +887,9 @@ app.post('/api/verify-renewal', async (req, res) => {
           existing.registrationId !== registrationId ||
           existing.renewalId !== renewalId
         ) {
-          throw new Error('This Paystack transaction reference has already been used.');
+          throw new Error(
+            'This Paystack transaction reference has already been used.'
+          );
         }
 
         renewalResult = { alreadyProcessed: true };
@@ -857,7 +992,10 @@ app.post('/api/verify-renewal', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Renewal verification error:', error.message);
+    console.error(
+      'Renewal verification error:',
+      error.message
+    );
 
     if (
       error.name === 'TimeoutError' ||
@@ -890,7 +1028,7 @@ app.post('/api/verify-renewal', async (req, res) => {
 });
 
 // ======================================================
-// 8. VERIFY FLEXI MASTERCLASS ACCOUNT FOR JARVIS
+// 11. VERIFY FLEXI MASTERCLASS ACCOUNT FOR JARVIS
 // ======================================================
 //
 // POST /api/verify-masterclass
@@ -915,8 +1053,8 @@ app.post('/api/verify-renewal', async (req, res) => {
 // - paymentVerified === true.
 // - An active, unexpired subscription.
 //
-// This endpoint does not create a new Flexi Lessons
-// registration or independently grant a JARVIS plan.
+// The endpoint saves the verified entitlement to
+// JARVIS Supabase using the server-only secret key.
 
 app.post('/api/verify-masterclass', async (req, res) => {
   if (firebaseInitializationError || !db) {
@@ -927,17 +1065,26 @@ app.post('/api/verify-masterclass', async (req, res) => {
     });
   }
 
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+  if (
+    !SUPABASE_URL ||
+    !SUPABASE_ANON_KEY ||
+    !SUPABASE_SERVICE_ROLE_KEY
+  ) {
     return res.status(503).json({
       success: false,
       eligible: false,
-      error: 'Masterclass verification is not configured.'
+      error: 'Masterclass verification and entitlement storage are not fully configured.'
     });
   }
 
   try {
-    const authorization = safeString(req.headers.authorization);
-    const tokenMatch = authorization.match(/^Bearer\s+(.+)$/i);
+    const authorization = safeString(
+      req.headers.authorization
+    );
+
+    const tokenMatch = authorization.match(
+      /^Bearer\s+(.+)$/i
+    );
 
     if (!tokenMatch) {
       return res.status(401).json({
@@ -959,6 +1106,7 @@ app.post('/api/verify-masterclass', async (req, res) => {
 
     // Verify the token with Supabase Auth.
     // Never trust an email supplied by the Android client.
+
     const supabaseResponse = await fetch(
       `${SUPABASE_URL.replace(/\/+$/, '')}/auth/v1/user`,
       {
@@ -990,9 +1138,8 @@ app.post('/api/verify-masterclass', async (req, res) => {
       });
     }
 
-    const authenticatedEmail = normalizeMasterclassEmail(
-      authUser.email
-    );
+    const authenticatedEmail =
+      normalizeMasterclassEmail(authUser.email);
 
     const emailConfirmed = Boolean(
       authUser.email_confirmed_at ||
@@ -1021,12 +1168,17 @@ app.post('/api/verify-masterclass', async (req, res) => {
 
     // Search the existing registrations collection.
     // Both queries use the authenticated Supabase email.
+
     const registrationsRef = db.collection('registrations');
 
-    const [studentEmailSnapshot, emailSnapshot] = await Promise.all([
+    const [
+      studentEmailSnapshot,
+      emailSnapshot
+    ] = await Promise.all([
       registrationsRef
         .where('studentEmail', '==', authenticatedEmail)
         .get(),
+
       registrationsRef
         .where('email', '==', authenticatedEmail)
         .get()
@@ -1056,7 +1208,11 @@ app.post('/api/verify-masterclass', async (req, res) => {
       }
     }
 
+    // No matching registration: remove any old entitlement.
+
     if (matchingRegistrations.length === 0) {
+      await revokeMasterclassEntitlement(authUser.id);
+
       return res.status(404).json({
         success: true,
         eligible: false,
@@ -1067,8 +1223,9 @@ app.post('/api/verify-masterclass', async (req, res) => {
       });
     }
 
-    // Evaluate every matching registration. A student may have
-    // older registrations as well as a newer paid registration.
+    // A student may have older registrations and a newer
+    // paid registration. Evaluate all matching records.
+
     const now = Date.now();
 
     const evaluated = matchingRegistrations.map(item => {
@@ -1099,43 +1256,78 @@ app.post('/api/verify-masterclass', async (req, res) => {
 
     const activeRegistrations = evaluated
       .filter(item => item.active)
-      .sort((a, b) => b.expiry.getTime() - a.expiry.getTime());
+      .sort(
+        (a, b) =>
+          b.expiry.getTime() - a.expiry.getTime()
+      );
+
+    // ==================================================
+    // ACTIVE SUBSCRIPTION: SAVE ENTITLEMENT
+    // ==================================================
 
     if (activeRegistrations.length > 0) {
       const selected = activeRegistrations[0];
       const registration = selected.registration;
+
+      await saveMasterclassEntitlement(authUser.id, {
+        registrationId:
+          safeString(registration.registrationId) ||
+          selected.id,
+
+        email: authenticatedEmail,
+
+        subscriptionPlan: safeString(
+          registration.subscriptionPlan
+        ),
+
+        expiresAt: selected.expiry.toISOString()
+      });
 
       return res.status(200).json({
         success: true,
         eligible: true,
         masterclassActive: true,
         unlimitedAccess: true,
+
         account: {
-          registrationId: safeString(
-            registration.registrationId
-          ) || selected.id,
+          registrationId:
+            safeString(registration.registrationId) ||
+            selected.id,
+
           firstName: safeString(registration.firstName),
           surname: safeString(registration.surname),
+
           displayName: [
             safeString(registration.firstName),
             safeString(registration.surname)
           ].filter(Boolean).join(' '),
+
           email: authenticatedEmail,
+
           subscriptionPlan: safeString(
             registration.subscriptionPlan
           ),
+
           subscriptionLabel: safeString(
             registration.subscriptionLabel
           )
         },
+
         expiresAt: selected.expiry.toISOString(),
+
         message: 'Your Flexi Masterclass subscription is active. Unlimited JARVIS access is available until your subscription expires.'
       });
     }
 
+    // ==================================================
+    // INACTIVE SUBSCRIPTION: REVOKE ENTITLEMENT
+    // ==================================================
+
     const hasVerifiedPayment = evaluated.some(
       item => item.paymentVerified
     );
+
+    await revokeMasterclassEntitlement(authUser.id);
 
     if (hasVerifiedPayment) {
       return res.status(200).json({
@@ -1158,7 +1350,10 @@ app.post('/api/verify-masterclass', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Masterclass verification error:', error.message);
+    console.error(
+      'Masterclass verification error:',
+      error.message
+    );
 
     if (
       error.name === 'TimeoutError' ||
@@ -1180,7 +1375,7 @@ app.post('/api/verify-masterclass', async (req, res) => {
 });
 
 // ======================================================
-// 9. UNKNOWN ROUTES
+// 12. UNKNOWN ROUTES
 // ======================================================
 
 app.use((req, res) => {
@@ -1191,7 +1386,7 @@ app.use((req, res) => {
 });
 
 // ======================================================
-// 10. ERROR HANDLER
+// 13. ERROR HANDLER
 // ======================================================
 
 app.use((error, req, res, next) => {
@@ -1206,7 +1401,10 @@ app.use((error, req, res, next) => {
     });
   }
 
-  console.error('Unhandled API error:', error.message);
+  console.error(
+    'Unhandled API error:',
+    error.message
+  );
 
   return res.status(500).json({
     success: false,
@@ -1215,7 +1413,7 @@ app.use((error, req, res, next) => {
 });
 
 // ======================================================
-// 11. EXPORT FOR VERCEL
+// 14. EXPORT FOR VERCEL
 // ======================================================
 
 module.exports = app;
