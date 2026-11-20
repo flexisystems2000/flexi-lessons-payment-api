@@ -1,3 +1,4 @@
+
 'use strict';
 
 const express = require('express');
@@ -14,9 +15,11 @@ app.use(express.json({ limit: '20kb' }));
 // ======================================================
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-
 const FIREBASE_SERVICE_ACCOUNT_JSON =
   process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY;
 
 const PORT = process.env.PORT || 3000;
 
@@ -37,32 +40,21 @@ const ALLOWED_ORIGINS = (
   .map(origin => origin.trim().replace(/\/$/, ''))
   .filter(Boolean);
 
-app.use(
-  cors({
-    origin(origin, callback) {
-      // Requests without an Origin header can be server-to-server.
-      if (!origin) {
-        return callback(null, true);
-      }
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
 
-      const normalizedOrigin = origin.replace(/\/$/, '');
+    if (ALLOWED_ORIGINS.includes(origin.replace(/\/$/, ''))) {
+      return callback(null, true);
+    }
 
-      if (ALLOWED_ORIGINS.includes(normalizedOrigin)) {
-        return callback(null, true);
-      }
-
-      return callback(new Error('Origin not allowed by CORS'));
-    },
-
-    methods: ['GET', 'POST', 'OPTIONS'],
-
-    allowedHeaders: ['Content-Type', 'Authorization'],
-
-    credentials: false,
-
-    maxAge: 86400
-  })
-);
+    return callback(new Error('Origin not allowed by CORS'));
+  },
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: false,
+  maxAge: 86400
+}));
 
 // ======================================================
 // 2. FIREBASE ADMIN INITIALIZATION
@@ -89,28 +81,15 @@ try {
   }
 
   db = admin.firestore();
-
   console.log('Firebase Admin initialized.');
 } catch (error) {
   firebaseInitializationError = error.message;
-
-  console.error(
-    'Firebase initialization failed:',
-    error.message
-  );
+  console.error('Firebase initialization failed:', error.message);
 }
 
 // ======================================================
 // 3. PAYMENT PLAN CONFIGURATION
 // ======================================================
-
-// These are the package prices before the checkout fee.
-//
-// monthly   = ₦4,000
-// twoMonths = ₦7,500
-// threeMonths = ₦10,000
-//
-// Keep these synchronized with page3.html and renewal.html.
 
 const PAYMENT_PLANS = {
   monthly: 4000,
@@ -135,15 +114,11 @@ const PLAN_LABELS = {
 // ======================================================
 
 function safeString(value) {
-  return typeof value === 'string'
-    ? value.trim()
-    : '';
+  return typeof value === 'string' ? value.trim() : '';
 }
 
 function normalizePaymentStatus(value) {
-  return String(value || '')
-    .trim()
-    .toLowerCase();
+  return String(value || '').trim().toLowerCase();
 }
 
 function isPaymentConfirmed(registration) {
@@ -154,9 +129,7 @@ function isPaymentConfirmed(registration) {
 }
 
 function normalizePlan(value) {
-  if (!value) {
-    return null;
-  }
+  if (!value) return null;
 
   const plan = String(value)
     .trim()
@@ -168,12 +141,10 @@ function normalizePlan(value) {
     onemonth: 'monthly',
     '1month': 'monthly',
     one: 'monthly',
-
     twomonths: 'twoMonths',
     twomonth: 'twoMonths',
     '2months': 'twoMonths',
     '2month': 'twoMonths',
-
     threemonths: 'threeMonths',
     threemonth: 'threeMonths',
     '3months': 'threeMonths',
@@ -183,11 +154,8 @@ function normalizePlan(value) {
   return aliases[plan] || null;
 }
 
-// Must match the checkout calculation used by the frontend.
 function calculateGrossAmountNaira(netAmountNaira) {
-  return Math.ceil(
-    (netAmountNaira + 100) / (1 - 0.015)
-  );
+  return Math.ceil((netAmountNaira + 100) / (1 - 0.015));
 }
 
 function getExpectedAmountKobo(registration) {
@@ -202,22 +170,13 @@ function getExpectedAmountKobo(registration) {
     Number.isFinite(Number(registration.grossAmount)) &&
     Number(registration.grossAmount) > 0
   ) {
-    return Math.round(
-      Number(registration.grossAmount) * 100
-    );
+    return Math.round(Number(registration.grossAmount) * 100);
   }
 
-  const normalizedPlan = normalizePlan(
-    registration.subscriptionPlan
-  );
+  const plan = normalizePlan(registration.subscriptionPlan);
+  if (!plan) return null;
 
-  if (!normalizedPlan) {
-    return null;
-  }
-
-  const netAmount = PAYMENT_PLANS[normalizedPlan];
-
-  return calculateGrossAmountNaira(netAmount) * 100;
+  return calculateGrossAmountNaira(PAYMENT_PLANS[plan]) * 100;
 }
 
 function requireConfiguration(res) {
@@ -226,7 +185,6 @@ function requireConfiguration(res) {
       success: false,
       error: 'The database service is not ready.'
     });
-
     return false;
   }
 
@@ -235,18 +193,14 @@ function requireConfiguration(res) {
       success: false,
       error: 'The payment service is not configured.'
     });
-
     return false;
   }
 
   return true;
 }
 
-// Parse supported Firestore timestamp and date values.
 function dateFromStoredValue(value) {
-  if (!value) {
-    return null;
-  }
+  if (!value) return null;
 
   if (typeof value.toDate === 'function') {
     return value.toDate();
@@ -261,13 +215,9 @@ function dateFromStoredValue(value) {
 
   const parsed = new Date(value);
 
-  return Number.isNaN(parsed.getTime())
-    ? null
-    : parsed;
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
-// Add calendar months without rolling dates into the wrong month.
-// Example: January 31 + one month becomes the last day of February.
 function addCalendarMonths(date, months) {
   const result = new Date(date);
   const originalDay = result.getDate();
@@ -282,12 +232,115 @@ function addCalendarMonths(date, months) {
   ).getDate();
 
   result.setDate(Math.min(originalDay, lastDay));
-
   return result;
 }
 
+function normalizeMasterclassEmail(value) {
+  return safeString(value).toLowerCase();
+}
+
+function normalizeMasterclassPhone(value) {
+  let digits = String(value || '').replace(/\D/g, '');
+
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
+  }
+
+  if (digits.startsWith('0') && digits.length === 11) {
+    digits = '234' + digits.slice(1);
+  } else if (digits.length === 10) {
+    digits = '234' + digits;
+  }
+
+  return digits;
+}
+
+function getRegistrationPhoneNumbers(registration) {
+  return [
+    registration.studentPhone,
+    registration.whatsappNumber,
+    registration.whatsapp,
+    registration.phone
+  ]
+    .map(normalizeMasterclassPhone)
+    .filter(Boolean);
+}
+
+function getMasterclassSubscriptionExpiry(registration) {
+  const directExpiryFields = [
+    registration.subscriptionExpiryDate,
+    registration.expiryDate,
+    registration.expiresAt,
+    registration.subscriptionEndDate,
+    registration.subscriptionExpiryDate
+  ];
+
+  for (const value of directExpiryFields) {
+    const date = dateFromStoredValue(value);
+    if (date) return date;
+  }
+
+  // Fallback for older registration records.
+  // Never calculate an expiry for an unverified payment.
+  if (
+    registration.paymentStatus !== true ||
+    registration.paymentVerified !== true
+  ) {
+    return null;
+  }
+
+  const months = Number(registration.subscriptionMonths);
+
+  if (![1, 2, 3].includes(months)) {
+    return null;
+  }
+
+  const startDate =
+    dateFromStoredValue(registration.subscriptionStartDate) ||
+    dateFromStoredValue(registration.paymentVerifiedAt) ||
+    dateFromStoredValue(registration.paidAt) ||
+    dateFromStoredValue(registration.createdAt);
+
+  if (!startDate) return null;
+
+  return addCalendarMonths(startDate, months);
+}
+
+async function verifyPaystackTransaction(reference) {
+  const response = await fetch(
+    'https://api.paystack.co/transaction/verify/' +
+      encodeURIComponent(reference),
+    {
+      method: 'GET',
+      headers: {
+        Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
+        Accept: 'application/json'
+      },
+      signal: AbortSignal.timeout(15000)
+    }
+  );
+
+  let result;
+
+  try {
+    result = await response.json();
+  } catch {
+    const error = new Error('Paystack returned an invalid response.');
+    error.statusCode = 502;
+    throw error;
+  }
+
+  if (!response.ok || result.status !== true || !result.data) {
+    const error = new Error('Paystack could not verify this transaction.');
+    error.statusCode = 502;
+    throw error;
+  }
+
+  return result.data;
+}
+
 // ======================================================
-// 5. HEALTH CHECK
+// 5. HEALTH CHECKS
 // ======================================================
 
 app.get('/', (req, res) => {
@@ -295,7 +348,7 @@ app.get('/', (req, res) => {
     success: true,
     service: 'Flexi Lessons Payment API',
     status: 'running',
-    version: '1.1.0'
+    version: '1.2.0'
   });
 });
 
@@ -305,51 +358,31 @@ app.get('/api/health', (req, res) => {
     service: 'Flexi Lessons Payment API',
     status: 'running',
     firebaseReady: Boolean(db),
-    paystackConfigured: Boolean(PAYSTACK_SECRET_KEY)
+    paystackConfigured: Boolean(PAYSTACK_SECRET_KEY),
+    supabaseConfigured: Boolean(SUPABASE_URL && SUPABASE_ANON_KEY)
   });
 });
 
 // ======================================================
 // 6. VERIFY ORIGINAL REGISTRATION PAYMENT
 // ======================================================
-//
-// This endpoint is retained for the existing registration
-// payment process. The renewal flow has its own endpoint below.
-//
-// Existing flow:
-// page2.html -> page3.html -> Paystack -> page4.html
-//
-// Do not use this endpoint to apply subscription renewals.
 
 app.post('/api/verify-payment', async (req, res) => {
-  if (!requireConfiguration(res)) {
-    return;
-  }
+  if (!requireConfiguration(res)) return;
 
   try {
-    const registrationId = safeString(
-      req.body.registrationId
-    );
-
-    const reference = safeString(
-      req.body.reference
-    );
-
-    if (!registrationId || !reference) {
-      return res.status(400).json({
-        success: false,
-        error:
-          'Registration ID and transaction reference are required.'
-      });
-    }
+    const registrationId = safeString(req.body.registrationId);
+    const reference = safeString(req.body.reference);
 
     if (
+      !registrationId ||
+      !reference ||
       registrationId.length > 150 ||
       reference.length > 200
     ) {
       return res.status(400).json({
         success: false,
-        error: 'Invalid registration ID or transaction reference.'
+        error: 'Registration ID and transaction reference are required.'
       });
     }
 
@@ -357,24 +390,18 @@ app.post('/api/verify-payment', async (req, res) => {
       .collection('registrations')
       .doc(registrationId);
 
-    const registrationSnapshot = await registrationRef.get();
+    const snapshot = await registrationRef.get();
 
-    if (!registrationSnapshot.exists) {
+    if (!snapshot.exists) {
       return res.status(404).json({
         success: false,
         error: 'Registration record was not found.'
       });
     }
 
-    const registration = registrationSnapshot.data();
-
-    const savedReference = safeString(
-      registration.paystackReference
-    );
-
-    const storedRegistrationId = safeString(
-      registration.registrationId
-    );
+    const registration = snapshot.data() || {};
+    const savedReference = safeString(registration.paystackReference);
+    const storedRegistrationId = safeString(registration.registrationId);
 
     const referenceMatches =
       reference === registrationId ||
@@ -384,12 +411,10 @@ app.post('/api/verify-payment', async (req, res) => {
     if (!referenceMatches) {
       return res.status(403).json({
         success: false,
-        error:
-          'The transaction reference does not match this registration.'
+        error: 'The transaction reference does not match this registration.'
       });
     }
 
-    // Preserve the existing initial-payment idempotency behaviour.
     if (
       isPaymentConfirmed(registration) &&
       (
@@ -404,50 +429,11 @@ app.post('/api/verify-payment', async (req, res) => {
         alreadyConfirmed: true,
         registrationId,
         paymentStatus: 'paid',
-        message:
-          'This registration already has a confirmed payment.'
+        message: 'This registration already has a confirmed payment.'
       });
     }
 
-    const paystackResponse = await fetch(
-      'https://api.paystack.co/transaction/verify/' +
-        encodeURIComponent(reference),
-      {
-        method: 'GET',
-
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-          Accept: 'application/json'
-        },
-
-        signal: AbortSignal.timeout(15000)
-      }
-    );
-
-    let paystackResult;
-
-    try {
-      paystackResult = await paystackResponse.json();
-    } catch {
-      return res.status(502).json({
-        success: false,
-        error: 'Paystack returned an invalid response.'
-      });
-    }
-
-    if (
-      !paystackResponse.ok ||
-      paystackResult.status !== true ||
-      !paystackResult.data
-    ) {
-      return res.status(400).json({
-        success: false,
-        verified: false,
-        error: 'Paystack could not verify this transaction.'
-      });
-    }
-
-    const transaction = paystackResult.data;
+    const transaction = await verifyPaystackTransaction(reference);
 
     if (transaction.status !== 'success') {
       return res.status(200).json({
@@ -456,8 +442,7 @@ app.post('/api/verify-payment', async (req, res) => {
         registrationId,
         paymentStatus: 'unconfirmed',
         transactionStatus: transaction.status || 'unknown',
-        message:
-          'The transaction has not been confirmed as successful.'
+        message: 'The transaction has not been confirmed as successful.'
       });
     }
 
@@ -465,8 +450,7 @@ app.post('/api/verify-payment', async (req, res) => {
       return res.status(400).json({
         success: false,
         verified: false,
-        error:
-          'The transaction reference returned by Paystack does not match.'
+        error: 'The transaction reference returned by Paystack does not match.'
       });
     }
 
@@ -478,23 +462,16 @@ app.post('/api/verify-payment', async (req, res) => {
       });
     }
 
-    const expectedAmountKobo =
-      getExpectedAmountKobo(registration);
+    const expectedAmountKobo = getExpectedAmountKobo(registration);
 
     if (
       !Number.isSafeInteger(expectedAmountKobo) ||
       expectedAmountKobo <= 0
     ) {
-      console.error(
-        'Expected payment amount missing or invalid:',
-        registrationId
-      );
-
       return res.status(409).json({
         success: false,
         verified: false,
-        error:
-          'The expected payment amount is missing or invalid.'
+        error: 'The expected payment amount is missing or invalid.'
       });
     }
 
@@ -508,8 +485,7 @@ app.post('/api/verify-payment', async (req, res) => {
       return res.status(400).json({
         success: false,
         verified: false,
-        error:
-          'The verified payment amount does not match the expected amount.'
+        error: 'The verified payment amount does not match the expected amount.'
       });
     }
 
@@ -519,67 +495,41 @@ app.post('/api/verify-payment', async (req, res) => {
     ) {
       return res.status(400).json({
         success: false,
-        error:
-          'The registration ID does not match the stored record.'
+        error: 'The registration ID does not match the stored record.'
       });
     }
 
-    const confirmedAt =
-      admin.firestore.FieldValue.serverTimestamp();
+    const confirmedAt = admin.firestore.FieldValue.serverTimestamp();
 
-    await db.runTransaction(async firestoreTransaction => {
-      const freshSnapshot =
-        await firestoreTransaction.get(registrationRef);
+    await db.runTransaction(async transactionWriter => {
+      const freshSnapshot = await transactionWriter.get(registrationRef);
 
       if (!freshSnapshot.exists) {
-        throw new Error(
-          'Registration disappeared during verification.'
-        );
+        throw new Error('Registration disappeared during verification.');
       }
 
-      const freshData = freshSnapshot.data();
+      const freshData = freshSnapshot.data() || {};
+      const freshReference = safeString(freshData.paystackReference);
 
-      const freshSavedReference = safeString(
-        freshData.paystackReference
-      );
-
-      if (
-        freshSavedReference &&
-        freshSavedReference !== reference
-      ) {
-        throw new Error(
-          'The stored payment reference changed during verification.'
-        );
+      if (freshReference && freshReference !== reference) {
+        throw new Error('The stored payment reference changed during verification.');
       }
 
-      firestoreTransaction.set(
-        registrationRef,
-        {
-          registrationId,
-
-          paystackReference: reference,
-
-          paymentStatus: true,
-          paymentVerificationPending: false,
-          paymentVerified: true,
-
-          paymentMethod: 'Paystack',
-          paymentCurrency: transaction.currency,
-
-          paymentAmountKobo: transaction.amount,
-          paymentAmountNaira: transaction.amount / 100,
-
-          paystackTransactionId: String(
-            transaction.id || ''
-          ),
-
-          paymentChannel: transaction.channel || null,
-
-          paymentVerifiedAt: confirmedAt,
-          paymentUpdatedAt: confirmedAt
-        },
-        { merge: true }
-      );
+      transactionWriter.set(registrationRef, {
+        registrationId,
+        paystackReference: reference,
+        paymentStatus: true,
+        paymentVerificationPending: false,
+        paymentVerified: true,
+        paymentMethod: 'Paystack',
+        paymentCurrency: transaction.currency,
+        paymentAmountKobo: transaction.amount,
+        paymentAmountNaira: transaction.amount / 100,
+        paystackTransactionId: String(transaction.id || ''),
+        paymentChannel: transaction.channel || null,
+        paymentVerifiedAt: confirmedAt,
+        paymentUpdatedAt: confirmedAt
+      }, { merge: true });
     });
 
     return res.status(200).json({
@@ -594,10 +544,7 @@ app.post('/api/verify-payment', async (req, res) => {
     });
 
   } catch (error) {
-    console.error(
-      'Payment verification error:',
-      error.message
-    );
+    console.error('Payment verification error:', error.message);
 
     if (
       error.name === 'TimeoutError' ||
@@ -605,15 +552,15 @@ app.post('/api/verify-payment', async (req, res) => {
     ) {
       return res.status(504).json({
         success: false,
-        error:
-          'Paystack verification timed out. Please try again later.'
+        error: 'Paystack verification timed out. Please try again later.'
       });
     }
 
-    return res.status(500).json({
+    return res.status(error.statusCode || 500).json({
       success: false,
-      error:
-        'An internal error occurred while verifying the payment.'
+      error: error.statusCode
+        ? error.message
+        : 'An internal error occurred while verifying the payment.'
     });
   }
 });
@@ -621,43 +568,14 @@ app.post('/api/verify-payment', async (req, res) => {
 // ======================================================
 // 7. VERIFY SUBSCRIPTION RENEWAL
 // ======================================================
-//
-// Endpoint:
-// POST /api/verify-renewal
-//
-// Request body:
-// {
-//   "registrationId": "EXISTING_REGISTRATION_ID",
-//   "renewalId": "FLEXIRENEW_...",
-//   "reference": "PAYSTACK_TRANSACTION_REFERENCE"
-// }
-//
-// Renewal process:
-// 1. Find the existing registration.
-// 2. Check the pending renewal details.
-// 3. Verify the transaction directly with Paystack.
-// 4. Validate the reference, status, currency and amount.
-// 5. Atomically record the transaction and extend the existing
-//    student's subscription.
-// 6. Prevent the same reference from extending a subscription twice.
 
 app.post('/api/verify-renewal', async (req, res) => {
-  if (!requireConfiguration(res)) {
-    return;
-  }
+  if (!requireConfiguration(res)) return;
 
   try {
-    const registrationId = safeString(
-      req.body.registrationId
-    );
-
-    const reference = safeString(
-      req.body.reference
-    );
-
-    const renewalId = safeString(
-      req.body.renewalId
-    );
+    const registrationId = safeString(req.body.registrationId);
+    const reference = safeString(req.body.reference);
+    const renewalId = safeString(req.body.renewalId);
 
     if (
       !registrationId ||
@@ -670,14 +588,9 @@ app.post('/api/verify-renewal', async (req, res) => {
       return res.status(400).json({
         success: false,
         verified: false,
-        error:
-          'Registration ID, renewal ID and transaction reference are required.'
+        error: 'Registration ID, renewal ID and transaction reference are required.'
       });
     }
-
-    // --------------------------------------------------
-    // A. LOAD THE EXISTING STUDENT REGISTRATION
-    // --------------------------------------------------
 
     const registrationRef = db
       .collection('registrations')
@@ -696,10 +609,6 @@ app.post('/api/verify-renewal', async (req, res) => {
     const initialData = initialSnapshot.data() || {};
     const pending = initialData.pendingRenewal || {};
 
-    // --------------------------------------------------
-    // B. MATCH THE REFERENCE TO THE PENDING RENEWAL
-    // --------------------------------------------------
-
     const allowedReferences = [
       safeString(pending.expectedPaystackReference),
       safeString(pending.paystackReference)
@@ -712,13 +621,10 @@ app.post('/api/verify-renewal', async (req, res) => {
       return res.status(403).json({
         success: false,
         verified: false,
-        error:
-          'The transaction does not match the pending renewal.'
+        error: 'The transaction does not match the pending renewal.'
       });
     }
 
-    // The same renewal has already been applied.
-    // Return success without extending the expiry again.
     if (
       pending.status === 'paid' &&
       pending.verifiedReference === reference
@@ -730,33 +636,17 @@ app.post('/api/verify-renewal', async (req, res) => {
         registrationId,
         renewalId,
         reference,
-        message:
-          'This renewal payment was already processed.'
+        message: 'This renewal payment was already processed.'
       });
     }
 
-    // --------------------------------------------------
-    // C. VALIDATE THE PACKAGE AND EXPECTED AMOUNT
-    // --------------------------------------------------
-
-    const normalizedPlan = normalizePlan(
-      pending.planKey
-    );
-
-    const months = normalizedPlan
-      ? PLAN_MONTHS[normalizedPlan]
-      : 0;
-
-    const netAmount = normalizedPlan
-      ? PAYMENT_PLANS[normalizedPlan]
-      : 0;
-
+    const normalizedPlan = normalizePlan(pending.planKey);
+    const months = normalizedPlan ? PLAN_MONTHS[normalizedPlan] : 0;
+    const netAmount = normalizedPlan ? PAYMENT_PLANS[normalizedPlan] : 0;
     const expectedGrossNaira = netAmount
       ? calculateGrossAmountNaira(netAmount)
       : 0;
-
-    const expectedAmountKobo =
-      expectedGrossNaira * 100;
+    const expectedAmountKobo = expectedGrossNaira * 100;
 
     if (
       !months ||
@@ -769,60 +659,11 @@ app.post('/api/verify-renewal', async (req, res) => {
       return res.status(409).json({
         success: false,
         verified: false,
-        error:
-          'The pending renewal package or expected amount is invalid. Please contact support.'
+        error: 'The pending renewal package or expected amount is invalid. Please contact support.'
       });
     }
 
-    // --------------------------------------------------
-    // D. VERIFY THE TRANSACTION DIRECTLY WITH PAYSTACK
-    // --------------------------------------------------
-
-    const paystackResponse = await fetch(
-      'https://api.paystack.co/transaction/verify/' +
-        encodeURIComponent(reference),
-      {
-        method: 'GET',
-
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-          Accept: 'application/json'
-        },
-
-        signal: AbortSignal.timeout(15000)
-      }
-    );
-
-    let paystackResult;
-
-    try {
-      paystackResult = await paystackResponse.json();
-    } catch {
-      return res.status(502).json({
-        success: false,
-        verified: false,
-        error: 'Paystack returned an invalid response.'
-      });
-    }
-
-    if (
-      !paystackResponse.ok ||
-      paystackResult.status !== true ||
-      !paystackResult.data
-    ) {
-      return res.status(502).json({
-        success: false,
-        verified: false,
-        error:
-          'Paystack could not verify this renewal transaction.'
-      });
-    }
-
-    const transaction = paystackResult.data;
-
-    // --------------------------------------------------
-    // E. CHECK THE ACTUAL TRANSACTION STATUS
-    // --------------------------------------------------
+    const transaction = await verifyPaystackTransaction(reference);
 
     if (transaction.status !== 'success') {
       return res.status(200).json({
@@ -831,40 +672,25 @@ app.post('/api/verify-renewal', async (req, res) => {
         registrationId,
         renewalId,
         transactionStatus: transaction.status || 'unknown',
-        message:
-          'The transaction has not been confirmed as successful.'
+        message: 'The transaction has not been confirmed as successful.'
       });
     }
-
-    // --------------------------------------------------
-    // F. CHECK THE TRANSACTION REFERENCE
-    // --------------------------------------------------
 
     if (transaction.reference !== reference) {
       return res.status(400).json({
         success: false,
         verified: false,
-        error:
-          'Paystack returned a different transaction reference.'
+        error: 'Paystack returned a different transaction reference.'
       });
     }
-
-    // --------------------------------------------------
-    // G. CHECK THE TRANSACTION CURRENCY
-    // --------------------------------------------------
 
     if (transaction.currency !== 'NGN') {
       return res.status(400).json({
         success: false,
         verified: false,
-        error:
-          'The transaction currency does not match NGN.'
+        error: 'The transaction currency does not match NGN.'
       });
     }
-
-    // --------------------------------------------------
-    // H. CHECK THE EXACT PAYMENT AMOUNT
-    // --------------------------------------------------
 
     if (transaction.amount !== expectedAmountKobo) {
       console.error('Renewal amount mismatch:', {
@@ -877,54 +703,38 @@ app.post('/api/verify-renewal', async (req, res) => {
       return res.status(400).json({
         success: false,
         verified: false,
-        error:
-          'The verified payment amount does not match the selected renewal package.'
+        error: 'The verified payment amount does not match the selected renewal package.'
       });
     }
-
-    // --------------------------------------------------
-    // I. ATOMICALLY RECORD PAYMENT AND EXTEND SUBSCRIPTION
-    // --------------------------------------------------
 
     const transactionRef = db
       .collection('paystackTransactions')
       .doc(reference);
 
-    const verifiedAt =
-      admin.firestore.FieldValue.serverTimestamp();
-
+    const verifiedAt = admin.firestore.FieldValue.serverTimestamp();
     let renewalResult = null;
 
-    await db.runTransaction(async firestoreTransaction => {
-      // Complete all reads before writing any documents.
-      const [freshSnapshot, transactionSnapshot] =
-        await Promise.all([
-          firestoreTransaction.get(registrationRef),
-          firestoreTransaction.get(transactionRef)
-        ]);
+    await db.runTransaction(async transactionWriter => {
+      const [freshSnapshot, transactionSnapshot] = await Promise.all([
+        transactionWriter.get(registrationRef),
+        transactionWriter.get(transactionRef)
+      ]);
 
       if (!freshSnapshot.exists) {
-        throw new Error(
-          'Student registration was not found during final verification.'
-        );
+        throw new Error('Student registration was not found during final verification.');
       }
 
       const freshData = freshSnapshot.data() || {};
       const freshPending = freshData.pendingRenewal || {};
 
-      // Another request may have completed this exact renewal.
       if (
         freshPending.status === 'paid' &&
         freshPending.verifiedReference === reference
       ) {
-        renewalResult = {
-          alreadyProcessed: true
-        };
-
+        renewalResult = { alreadyProcessed: true };
         return;
       }
 
-      // Ensure the pending renewal has not changed since verification.
       const freshAllowedReferences = [
         safeString(freshPending.expectedPaystackReference),
         safeString(freshPending.paystackReference)
@@ -934,63 +744,37 @@ app.post('/api/verify-renewal', async (req, res) => {
         freshPending.renewalId !== renewalId ||
         !freshAllowedReferences.includes(reference)
       ) {
-        throw new Error(
-          'The pending renewal changed during verification.'
-        );
+        throw new Error('The pending renewal changed during verification.');
       }
 
-      // A Paystack reference can be used only once.
       if (transactionSnapshot.exists) {
-        const existingTransaction =
-          transactionSnapshot.data() || {};
+        const existing = transactionSnapshot.data() || {};
 
         if (
-          existingTransaction.registrationId !== registrationId ||
-          existingTransaction.renewalId !== renewalId
+          existing.registrationId !== registrationId ||
+          existing.renewalId !== renewalId
         ) {
-          throw new Error(
-            'This Paystack transaction reference has already been used.'
-          );
+          throw new Error('This Paystack transaction reference has already been used.');
         }
 
-        renewalResult = {
-          alreadyProcessed: true
-        };
-
+        renewalResult = { alreadyProcessed: true };
         return;
       }
-
-      // ------------------------------------------------
-      // CALCULATE THE AUTHORITATIVE SUBSCRIPTION EXPIRY
-      // ------------------------------------------------
 
       const now = new Date();
 
       const currentExpiry =
-        dateFromStoredValue(
-          freshData.subscriptionExpiryDate
-        ) ||
-        dateFromStoredValue(
-          freshData.expiryDate
-        ) ||
-        dateFromStoredValue(
-          freshData.expiresAt
-        ) ||
-        dateFromStoredValue(
-          freshData.subscriptionEndDate
-        );
+        dateFromStoredValue(freshData.subscriptionExpiryDate) ||
+        dateFromStoredValue(freshData.expiryDate) ||
+        dateFromStoredValue(freshData.expiresAt) ||
+        dateFromStoredValue(freshData.subscriptionEndDate);
 
-      // If the subscription is active, extend from its existing
-      // expiry. Otherwise, start the renewed period now.
       const startDate =
         currentExpiry && currentExpiry > now
           ? currentExpiry
           : now;
 
-      const expiryDate = addCalendarMonths(
-        startDate,
-        months
-      );
+      const expiryDate = addCalendarMonths(startDate, months);
 
       const startTimestamp =
         admin.firestore.Timestamp.fromDate(startDate);
@@ -998,95 +782,54 @@ app.post('/api/verify-renewal', async (req, res) => {
       const expiryTimestamp =
         admin.firestore.Timestamp.fromDate(expiryDate);
 
-      // ------------------------------------------------
-      // RECORD THE UNIQUE PAYSTACK TRANSACTION
-      // ------------------------------------------------
-
-      firestoreTransaction.set(transactionRef, {
+      transactionWriter.set(transactionRef, {
         registrationId,
         renewalId,
         reference,
-
-        transactionId: String(
-          transaction.id || ''
-        ),
-
+        transactionId: String(transaction.id || ''),
         amountKobo: transaction.amount,
         amountNaira: transaction.amount / 100,
         currency: transaction.currency,
-
         status: 'success',
         type: 'subscription_renewal',
-
         channel: transaction.channel || null,
-
         processedAt: verifiedAt
       });
 
-      // ------------------------------------------------
-      // UPDATE THE EXISTING STUDENT REGISTRATION
-      // ------------------------------------------------
-
-      firestoreTransaction.set(
-        registrationRef,
-        {
-          // Preserve the existing registration/account.
-          registrationId,
-
-          subscriptionPlan: normalizedPlan,
-          subscriptionLabel: PLAN_LABELS[normalizedPlan],
-          subscriptionMonths: months,
-
-          subscriptionStartDate: startTimestamp,
-          subscriptionExpiryDate: expiryTimestamp,
-
-          // Maintain compatibility with existing frontend fields.
-          expiryDate: expiryTimestamp,
-          subscriptionEndDate: expiryTimestamp,
-
-          amountPaid: netAmount,
-          grossAmountPaid: expectedGrossNaira,
-
-          paymentStatus: true,
-          paymentVerified: true,
-          paymentVerificationPending: false,
-
-          lastRenewalId: renewalId,
-          lastRenewalReference: reference,
-
-          lastRenewalAmountKobo: transaction.amount,
-          lastRenewalAmountNaira: transaction.amount / 100,
-
-          lastRenewalPaymentMethod: 'Paystack',
-          lastRenewalCurrency: transaction.currency,
-
-          lastRenewalTransactionId: String(
-            transaction.id || ''
-          ),
-
-          lastRenewalChannel: transaction.channel || null,
-          lastRenewalVerifiedAt: verifiedAt,
-
-          pendingRenewal: {
-            ...freshPending,
-
-            status: 'paid',
-            verifiedReference: reference,
-
-            verifiedTransactionId: String(
-              transaction.id || ''
-            ),
-
-            verifiedAt: new Date().toISOString(),
-
-            appliedStartDate: startDate.toISOString(),
-            appliedExpiryDate: expiryDate.toISOString()
-          },
-
-          updatedAt: verifiedAt
+      transactionWriter.set(registrationRef, {
+        registrationId,
+        subscriptionPlan: normalizedPlan,
+        subscriptionLabel: PLAN_LABELS[normalizedPlan],
+        subscriptionMonths: months,
+        subscriptionStartDate: startTimestamp,
+        subscriptionExpiryDate: expiryTimestamp,
+        expiryDate: expiryTimestamp,
+        subscriptionEndDate: expiryTimestamp,
+        amountPaid: netAmount,
+        grossAmountPaid: expectedGrossNaira,
+        paymentStatus: true,
+        paymentVerified: true,
+        paymentVerificationPending: false,
+        lastRenewalId: renewalId,
+        lastRenewalReference: reference,
+        lastRenewalAmountKobo: transaction.amount,
+        lastRenewalAmountNaira: transaction.amount / 100,
+        lastRenewalPaymentMethod: 'Paystack',
+        lastRenewalCurrency: transaction.currency,
+        lastRenewalTransactionId: String(transaction.id || ''),
+        lastRenewalChannel: transaction.channel || null,
+        lastRenewalVerifiedAt: verifiedAt,
+        pendingRenewal: {
+          ...freshPending,
+          status: 'paid',
+          verifiedReference: reference,
+          verifiedTransactionId: String(transaction.id || ''),
+          verifiedAt: new Date().toISOString(),
+          appliedStartDate: startDate.toISOString(),
+          appliedExpiryDate: expiryDate.toISOString()
         },
-        { merge: true }
-      );
+        updatedAt: verifiedAt
+      }, { merge: true });
 
       renewalResult = {
         alreadyProcessed: false,
@@ -1094,43 +837,27 @@ app.post('/api/verify-renewal', async (req, res) => {
       };
     });
 
-    // --------------------------------------------------
-    // J. SUCCESS RESPONSE
-    // --------------------------------------------------
-
     return res.status(200).json({
       success: true,
       verified: true,
-
       alreadyProcessed: Boolean(
-        renewalResult &&
-        renewalResult.alreadyProcessed
+        renewalResult && renewalResult.alreadyProcessed
       ),
-
       registrationId,
       renewalId,
       reference,
-
       amount: transaction.amount / 100,
       currency: transaction.currency,
-
-      expiryDate:
-        renewalResult &&
-        renewalResult.expiryDate
-          ? renewalResult.expiryDate
-          : null,
-
-      message:
-        renewalResult && renewalResult.alreadyProcessed
-          ? 'This renewal payment was already processed.'
-          : 'Renewal payment verified and subscription extended.'
+      expiryDate: renewalResult && renewalResult.expiryDate
+        ? renewalResult.expiryDate
+        : null,
+      message: renewalResult && renewalResult.alreadyProcessed
+        ? 'This renewal payment was already processed.'
+        : 'Renewal payment verified and subscription extended.'
     });
 
   } catch (error) {
-    console.error(
-      'Renewal verification error:',
-      error.message
-    );
+    console.error('Renewal verification error:', error.message);
 
     if (
       error.name === 'TimeoutError' ||
@@ -1139,8 +866,7 @@ app.post('/api/verify-renewal', async (req, res) => {
       return res.status(504).json({
         success: false,
         verified: false,
-        error:
-          'Paystack verification timed out. Check the transaction status before trying again.'
+        error: 'Paystack verification timed out. Check the transaction status before trying again.'
       });
     }
 
@@ -1158,14 +884,303 @@ app.post('/api/verify-renewal', async (req, res) => {
     return res.status(500).json({
       success: false,
       verified: false,
-      error:
-        'An internal error occurred while verifying the renewal. Do not pay again until the transaction is checked.'
+      error: 'An internal error occurred while verifying the renewal. Do not pay again until the transaction is checked.'
     });
   }
 });
 
 // ======================================================
-// 8. UNKNOWN ROUTES
+// 8. VERIFY FLEXI MASTERCLASS ACCOUNT FOR JARVIS
+// ======================================================
+//
+// POST /api/verify-masterclass
+//
+// Authorization: Bearer <Supabase access token>
+//
+// Body:
+// {
+//   "whatsappNumber": "+2348012345678"
+// }
+//
+// The authenticated Supabase user's email is used.
+// The client cannot choose another student's email or
+// registration ID to claim a Masterclass subscription.
+//
+// Eligibility requires:
+// - A valid authenticated Supabase user.
+// - A confirmed Supabase email.
+// - A matching existing Flexi Lessons registration.
+// - A matching WhatsApp number.
+// - paymentStatus === true.
+// - paymentVerified === true.
+// - An active, unexpired subscription.
+//
+// This endpoint does not create a new Flexi Lessons
+// registration or independently grant a JARVIS plan.
+
+app.post('/api/verify-masterclass', async (req, res) => {
+  if (firebaseInitializationError || !db) {
+    return res.status(503).json({
+      success: false,
+      eligible: false,
+      error: 'The registration database is not ready.'
+    });
+  }
+
+  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+    return res.status(503).json({
+      success: false,
+      eligible: false,
+      error: 'Masterclass verification is not configured.'
+    });
+  }
+
+  try {
+    const authorization = safeString(req.headers.authorization);
+    const tokenMatch = authorization.match(/^Bearer\s+(.+)$/i);
+
+    if (!tokenMatch) {
+      return res.status(401).json({
+        success: false,
+        eligible: false,
+        error: 'A valid JARVIS sign-in session is required.'
+      });
+    }
+
+    const accessToken = tokenMatch[1].trim();
+
+    if (!accessToken || accessToken.length > 10000) {
+      return res.status(401).json({
+        success: false,
+        eligible: false,
+        error: 'Invalid authentication token.'
+      });
+    }
+
+    // Verify the token with Supabase Auth.
+    // Never trust an email supplied by the Android client.
+    const supabaseResponse = await fetch(
+      `${SUPABASE_URL.replace(/\/+$/, '')}/auth/v1/user`,
+      {
+        method: 'GET',
+        headers: {
+          apikey: SUPABASE_ANON_KEY,
+          Authorization: `Bearer ${accessToken}`,
+          Accept: 'application/json'
+        },
+        signal: AbortSignal.timeout(12000)
+      }
+    );
+
+    if (!supabaseResponse.ok) {
+      return res.status(401).json({
+        success: false,
+        eligible: false,
+        error: 'Your JARVIS session is invalid or has expired.'
+      });
+    }
+
+    const authUser = await supabaseResponse.json();
+
+    if (!authUser || !authUser.id) {
+      return res.status(401).json({
+        success: false,
+        eligible: false,
+        error: 'Unable to verify your JARVIS account.'
+      });
+    }
+
+    const authenticatedEmail = normalizeMasterclassEmail(
+      authUser.email
+    );
+
+    const emailConfirmed = Boolean(
+      authUser.email_confirmed_at ||
+      authUser.confirmed_at
+    );
+
+    if (!authenticatedEmail || !emailConfirmed) {
+      return res.status(403).json({
+        success: false,
+        eligible: false,
+        error: 'Please verify your JARVIS email address before linking Masterclass.'
+      });
+    }
+
+    const suppliedPhone = normalizeMasterclassPhone(
+      req.body && req.body.whatsappNumber
+    );
+
+    if (!suppliedPhone || suppliedPhone.length < 10) {
+      return res.status(400).json({
+        success: false,
+        eligible: false,
+        error: 'Enter the WhatsApp number used for your Flexi Lessons registration.'
+      });
+    }
+
+    // Search the existing registrations collection.
+    // Both queries use the authenticated Supabase email.
+    const registrationsRef = db.collection('registrations');
+
+    const [studentEmailSnapshot, emailSnapshot] = await Promise.all([
+      registrationsRef
+        .where('studentEmail', '==', authenticatedEmail)
+        .get(),
+      registrationsRef
+        .where('email', '==', authenticatedEmail)
+        .get()
+    ]);
+
+    const registrationMap = new Map();
+
+    for (const document of [
+      ...studentEmailSnapshot.docs,
+      ...emailSnapshot.docs
+    ]) {
+      registrationMap.set(document.id, {
+        id: document.id,
+        data: document.data() || {}
+      });
+    }
+
+    const matchingRegistrations = [];
+
+    for (const registration of registrationMap.values()) {
+      const phoneNumbers = getRegistrationPhoneNumbers(
+        registration.data
+      );
+
+      if (phoneNumbers.includes(suppliedPhone)) {
+        matchingRegistrations.push(registration);
+      }
+    }
+
+    if (matchingRegistrations.length === 0) {
+      return res.status(404).json({
+        success: true,
+        eligible: false,
+        masterclassActive: false,
+        unlimitedAccess: false,
+        code: 'REGISTRATION_NOT_FOUND',
+        message: 'No matching Flexi Lessons registration was found. Check that you entered the same email and WhatsApp number used during registration.'
+      });
+    }
+
+    // Evaluate every matching registration. A student may have
+    // older registrations as well as a newer paid registration.
+    const now = Date.now();
+
+    const evaluated = matchingRegistrations.map(item => {
+      const registration = item.data;
+
+      const paymentVerified =
+        registration.paymentStatus === true &&
+        registration.paymentVerified === true;
+
+      const expiry = paymentVerified
+        ? getMasterclassSubscriptionExpiry(registration)
+        : null;
+
+      const active = Boolean(
+        paymentVerified &&
+        expiry &&
+        expiry.getTime() > now
+      );
+
+      return {
+        id: item.id,
+        registration,
+        paymentVerified,
+        expiry,
+        active
+      };
+    });
+
+    const activeRegistrations = evaluated
+      .filter(item => item.active)
+      .sort((a, b) => b.expiry.getTime() - a.expiry.getTime());
+
+    if (activeRegistrations.length > 0) {
+      const selected = activeRegistrations[0];
+      const registration = selected.registration;
+
+      return res.status(200).json({
+        success: true,
+        eligible: true,
+        masterclassActive: true,
+        unlimitedAccess: true,
+        account: {
+          registrationId: safeString(
+            registration.registrationId
+          ) || selected.id,
+          firstName: safeString(registration.firstName),
+          surname: safeString(registration.surname),
+          displayName: [
+            safeString(registration.firstName),
+            safeString(registration.surname)
+          ].filter(Boolean).join(' '),
+          email: authenticatedEmail,
+          subscriptionPlan: safeString(
+            registration.subscriptionPlan
+          ),
+          subscriptionLabel: safeString(
+            registration.subscriptionLabel
+          )
+        },
+        expiresAt: selected.expiry.toISOString(),
+        message: 'Your Flexi Masterclass subscription is active. Unlimited JARVIS access is available until your subscription expires.'
+      });
+    }
+
+    const hasVerifiedPayment = evaluated.some(
+      item => item.paymentVerified
+    );
+
+    if (hasVerifiedPayment) {
+      return res.status(200).json({
+        success: true,
+        eligible: false,
+        masterclassActive: false,
+        unlimitedAccess: false,
+        code: 'SUBSCRIPTION_EXPIRED',
+        message: 'Your Flexi Masterclass subscription has expired. Renew your subscription to restore unlimited JARVIS access.'
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      eligible: false,
+      masterclassActive: false,
+      unlimitedAccess: false,
+      code: 'PAYMENT_NOT_VERIFIED',
+      message: 'The Flexi Lessons registration was found, but its payment has not been verified. Masterclass access cannot be activated.'
+    });
+
+  } catch (error) {
+    console.error('Masterclass verification error:', error.message);
+
+    if (
+      error.name === 'TimeoutError' ||
+      error.name === 'AbortError'
+    ) {
+      return res.status(504).json({
+        success: false,
+        eligible: false,
+        error: 'Masterclass verification timed out. Please try again.'
+      });
+    }
+
+    return res.status(500).json({
+      success: false,
+      eligible: false,
+      error: 'An internal error occurred while verifying your Masterclass account.'
+    });
+  }
+});
+
+// ======================================================
+// 9. UNKNOWN ROUTES
 // ======================================================
 
 app.use((req, res) => {
@@ -1176,7 +1191,7 @@ app.use((req, res) => {
 });
 
 // ======================================================
-// 9. ERROR HANDLER
+// 10. ERROR HANDLER
 // ======================================================
 
 app.use((error, req, res, next) => {
@@ -1187,15 +1202,11 @@ app.use((error, req, res, next) => {
   if (error.message === 'Origin not allowed by CORS') {
     return res.status(403).json({
       success: false,
-      error:
-        'This website is not permitted to access the API.'
+      error: 'This website is not permitted to access the API.'
     });
   }
 
-  console.error(
-    'Unhandled API error:',
-    error.message
-  );
+  console.error('Unhandled API error:', error.message);
 
   return res.status(500).json({
     success: false,
@@ -1204,7 +1215,7 @@ app.use((error, req, res, next) => {
 });
 
 // ======================================================
-// 10. EXPORT FOR VERCEL
+// 11. EXPORT FOR VERCEL
 // ======================================================
 
 module.exports = app;
